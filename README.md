@@ -63,12 +63,19 @@ Sections are matched against the PDF's embedded table of contents. The TOC viewe
 
 **Requirements:** Python 3.10+
 
+**Windows**
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Then open [http://localhost:8501](http://localhost:8501).
+**Mac**
+```bash
+pip3 install -r requirements.txt
+streamlit run app.py
+```
+
+Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ## Notes
 
