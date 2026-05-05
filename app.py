@@ -3,43 +3,69 @@ import streamlit as st
 import fitz  # PyMuPDF
 import re
 import io
+import json
 import zipfile
+from datetime import datetime
+from pathlib import Path
 
 st.set_page_config(page_title="Syllabus PDF Extractor", layout="wide")
 
+DATA_DIR = Path(__file__).parent / "data"
+STATE_FILE = DATA_DIR / "app_state.json"
+
 # ---------------------------------------------------------------------------
-# Helpers
+# Persistence
+# ---------------------------------------------------------------------------
+
+def load_saved_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"schedule": {}, "history": [], "num_weeks": 8, "class_names": []}
+
+
+def save_app_state(num_weeks: int, class_names: list[str], history: list[dict]):
+    schedule: dict[str, dict] = {}
+    for week in range(1, num_weeks + 1):
+        week_data = {}
+        for cname in class_names:
+            spec = st.session_state.get(f"sched_{week}_{cname}", "").strip()
+            if spec:
+                week_data[cname] = spec
+        if week_data:
+            schedule[str(week)] = week_data
+
+    DATA_DIR.mkdir(exist_ok=True)
+    STATE_FILE.write_text(
+        json.dumps(
+            {"schedule": schedule, "history": history, "num_weeks": num_weeks, "class_names": class_names},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# PDF helpers
 # ---------------------------------------------------------------------------
 
 def extract_section_number(title: str) -> str | None:
-    """Pull a leading section number out of a TOC title.
-
-    Handles both '21.4 Some Title' and 'Chapter 21 / Section 21.4' forms.
-    """
     m = re.match(r'^(\d+(?:\.\d+)*)', title.strip())
     if m:
         return m.group(1)
-    m = re.match(
-        r'^(?:chapter|section|unit|part)\s+(\d+(?:\.\d+)*)',
-        title.strip(),
-        re.IGNORECASE,
-    )
+    m = re.match(r'^(?:chapter|section|unit|part)\s+(\d+(?:\.\d+)*)', title.strip(), re.IGNORECASE)
     return m.group(1) if m else None
 
 
 def parse_section_spec(spec: str) -> list[str]:
-    """Parse a human-readable spec into a flat list of section IDs.
-
-    '21.4-5, 22.1-2'  →  ['21.4', '21.5', '22.1', '22.2']
-    '3, 4'            →  ['3', '4']
-    '21.4-21.6'       →  ['21.4', '21.5', '21.6']
-    """
+    """'21.4-5, 22.1-2' → ['21.4', '21.5', '22.1', '22.2']"""
     sections: list[str] = []
     for part in re.split(r'[,;]\s*', spec.strip()):
         part = part.strip()
         if not part:
             continue
-        # Range like "21.4-5" or "21.4-21.6"
         m = re.match(r'^(\d+)\.(\d+)-(?:(\d+)\.)?(\d+)$', part)
         if m:
             chapter = m.group(1)
@@ -49,7 +75,6 @@ def parse_section_spec(spec: str) -> list[str]:
             if end_chapter == chapter:
                 sections.extend(f"{chapter}.{s}" for s in range(start_sub, end_sub + 1))
             else:
-                # Cross-chapter range — add first and last as bookends
                 sections.append(f"{chapter}.{start_sub}")
                 sections.append(f"{end_chapter}.{end_sub}")
         else:
@@ -58,12 +83,7 @@ def parse_section_spec(spec: str) -> list[str]:
 
 
 def build_section_map(toc: list, page_count: int) -> dict[str, tuple[int, int]]:
-    """Return {section_number: (start_page, end_page)} using 0-based page indices.
-
-    End page for a section is determined by the next sibling/parent entry in the
-    TOC hierarchy, so subsections are included automatically.
-    """
-    entries: list[tuple[int, str, int]] = []  # (level, snum, page_0idx)
+    entries: list[tuple[int, str, int]] = []
     for level, title, page in toc:
         snum = extract_section_number(title)
         if snum:
@@ -76,7 +96,7 @@ def build_section_map(toc: list, page_count: int) -> dict[str, tuple[int, int]]:
             if entries[j][0] <= level:
                 end = entries[j][2] - 1
                 break
-        if snum not in section_map:  # first occurrence wins
+        if snum not in section_map:
             section_map[snum] = (start, end)
     return section_map
 
@@ -106,11 +126,31 @@ def extract_pages(pdf_bytes: bytes, page_ranges: list[tuple[int, int]]) -> bytes
     return result
 
 
+def make_zip_path(week: int, class_name: str, spec: str) -> str:
+    safe_class = re.sub(r"[^\w\s-]", "", class_name).strip().replace(" ", "_")
+    safe_spec = re.sub(r"[,;\s]+", "_", spec.strip()).strip("_")
+    return f"Week_{week:02d}/{safe_class}_Week{week:02d}_Ch{safe_spec}.pdf"
+
+
 # ---------------------------------------------------------------------------
-# Session state
+# Session state init — load saved state once per session
 # ---------------------------------------------------------------------------
 if "classes" not in st.session_state:
     st.session_state.classes: dict[str, dict] = {}
+
+if "history" not in st.session_state:
+    saved = load_saved_state()
+    st.session_state.history: list[dict] = saved.get("history", [])
+    st.session_state._saved_schedule: dict = saved.get("schedule", {})
+    st.session_state._saved_num_weeks: int = saved.get("num_weeks", 8)
+    st.session_state._saved_class_names: list[str] = saved.get("class_names", [])
+
+# Pre-populate schedule widget keys from saved state (only before first render)
+for _week_str, _class_specs in st.session_state._saved_schedule.items():
+    for _cname, _spec in _class_specs.items():
+        _key = f"sched_{_week_str}_{_cname}"
+        if _key not in st.session_state:
+            st.session_state[_key] = _spec
 
 # ---------------------------------------------------------------------------
 # UI
@@ -118,8 +158,15 @@ if "classes" not in st.session_state:
 st.title("Syllabus PDF Extractor")
 st.caption("Upload your textbooks, map your weekly schedule by section number, and download organized PDFs ready for NotebookLM.")
 
-# ── Step 1: Classes ─────────────────────────────────────────────────────────
+# ── Step 1: Classes ──────────────────────────────────────────────────────────
 st.header("1. Classes & Textbooks")
+
+# Remind user of previously used classes if none are loaded yet
+if not st.session_state.classes and st.session_state._saved_class_names:
+    st.info(
+        "Previously used classes: **" + "**, **".join(st.session_state._saved_class_names) +
+        "**. Re-upload their PDFs to continue — your schedule is already saved."
+    )
 
 with st.form("class_form", clear_on_submit=True):
     col1, col2 = st.columns([1, 2])
@@ -136,22 +183,20 @@ if submitted:
     else:
         st.error("Provide both a class name and a PDF file.")
 
-# Show loaded classes; track any removal request
 to_remove: str | None = None
 for cname, cdata in st.session_state.classes.items():
-    label = f"📖 {cname} — {len(cdata['section_map'])} sections, {cdata['page_count']} pages"
-    with st.expander(label):
+    with st.expander(f"📖 {cname} — {len(cdata['section_map'])} sections, {cdata['page_count']} pages"):
         if cdata["toc"]:
             lines = []
             for level, title, page in cdata["toc"][:50]:
                 snum = extract_section_number(title)
-                tag = f"  → matched as **{snum}**" if snum else "  *(no number — skipped)*"
+                tag = f"  → `{snum}`" if snum else "  *(skipped — no number)*"
                 lines.append(f"{'　' * (level - 1)}{title}  p.{page}{tag}")
             st.markdown("\n\n".join(lines))
             if len(cdata["toc"]) > 50:
                 st.caption(f"({len(cdata['toc']) - 50} more entries not shown)")
         else:
-            st.warning("No bookmarks found in this PDF. Section extraction won't work — check if your PDF has an embedded outline.")
+            st.warning("No bookmarks found. Section extraction won't work for this PDF.")
         if st.button("Remove", key=f"rm_{cname}"):
             to_remove = cname
 
@@ -159,34 +204,56 @@ if to_remove:
     del st.session_state.classes[to_remove]
     st.rerun()
 
-# ── Step 2: Schedule ────────────────────────────────────────────────────────
+# ── Step 2: Schedule ─────────────────────────────────────────────────────────
 if st.session_state.classes:
     st.header("2. Weekly Schedule")
-    st.caption(
-        "Enter section specs using the shorthand from your syllabus — e.g. `21.4-5, 22.1-2`. "
-        "Leave a cell blank to skip that class for the week."
-    )
+    st.caption("Enter section specs like `21.4-5, 22.1-2`. Leave blank to skip a class for that week.")
 
-    num_weeks = st.number_input("Number of weeks", min_value=1, max_value=30, value=8, step=1)
+    num_weeks = st.number_input(
+        "Number of weeks",
+        min_value=1,
+        max_value=30,
+        value=st.session_state._saved_num_weeks,
+        step=1,
+        key="num_weeks_input",
+    )
     class_names = list(st.session_state.classes.keys())
 
+    # Mark weeks that have already been extracted
+    extracted_weeks = {
+        (entry["week"], entry["class"])
+        for entry in st.session_state.history
+    }
+
     for week in range(1, int(num_weeks) + 1):
-        with st.expander(f"Week {week}"):
+        done_classes = [c for c in class_names if (week, c) in extracted_weeks]
+        badge = f" ✓ {', '.join(done_classes)}" if done_classes else ""
+        with st.expander(f"Week {week}{badge}"):
             cols = st.columns(len(class_names))
             for i, cname in enumerate(class_names):
+                already = (week, cname) in extracted_weeks
+                saved_spec = st.session_state._saved_schedule.get(str(week), {}).get(cname, "")
                 cols[i].text_input(
-                    cname,
+                    cname + (" ✓" if already else ""),
                     placeholder="21.4-5, 22.1-2",
                     key=f"sched_{week}_{cname}",
+                    value=saved_spec if f"sched_{week}_{cname}" not in st.session_state else st.session_state[f"sched_{week}_{cname}"],
                 )
 
-    # ── Step 3: Generate ────────────────────────────────────────────────────
+    col_save, col_gen = st.columns([1, 3])
+
+    if col_save.button("Save Schedule"):
+        save_app_state(int(num_weeks), class_names, st.session_state.history)
+        st.success("Schedule saved.")
+
+    # ── Step 3: Generate ─────────────────────────────────────────────────────
     st.header("3. Generate")
 
     if st.button("Generate Weekly PDFs", type="primary"):
         zip_buf = io.BytesIO()
         errors: list[str] = []
         file_count = 0
+        new_history: list[dict] = []
 
         with st.spinner("Extracting pages…"):
             with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -209,14 +276,33 @@ if st.session_state.classes:
 
                         if missing:
                             errors.append(
-                                f"Week {week} / {cname}: sections not found in TOC — `{'`, `'.join(missing)}`"
+                                f"Week {week} / {cname}: not found in TOC — `{'`, `'.join(missing)}`"
                             )
 
                         if page_ranges:
                             pdf_data = extract_pages(cdata["pdf_bytes"], page_ranges)
-                            safe = re.sub(r"[^\w\s-]", "", cname).strip().replace(" ", "_")
-                            zf.writestr(f"Week_{week:02d}/{safe}.pdf", pdf_data)
+                            zip_path = make_zip_path(week, cname, spec)
+                            zf.writestr(zip_path, pdf_data)
                             file_count += 1
+                            new_history.append({
+                                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                                "week": week,
+                                "class": cname,
+                                "spec": spec,
+                                "sections": sections,
+                                "filename": zip_path.split("/")[1],
+                            })
+
+        # Merge new history (replace any same week+class entries)
+        existing = [
+            e for e in st.session_state.history
+            if not any(n["week"] == e["week"] and n["class"] == e["class"] for n in new_history)
+        ]
+        st.session_state.history = sorted(
+            existing + new_history, key=lambda e: (e["week"], e["class"])
+        )
+
+        save_app_state(int(num_weeks), class_names, st.session_state.history)
 
         for e in errors:
             st.warning(e)
@@ -230,6 +316,23 @@ if st.session_state.classes:
                 mime="application/zip",
                 type="primary",
             )
-            st.success(f"Done — {file_count} PDF{'s' if file_count != 1 else ''} generated.")
+            st.success(f"Done — {file_count} PDF{'s' if file_count != 1 else ''} generated and schedule saved.")
         else:
             st.error("No PDFs generated. Check your schedule entries and verify section numbers match the TOC above.")
+
+# ── Extraction History ───────────────────────────────────────────────────────
+if st.session_state.history:
+    st.header("Extraction History")
+    import pandas as pd
+    df = pd.DataFrame(st.session_state.history)[["timestamp", "week", "class", "spec", "filename"]]
+    df.columns = ["Extracted", "Week", "Class", "Sections", "Filename"]
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if st.button("Clear History"):
+        st.session_state.history = []
+        save_app_state(
+            int(st.session_state.get("num_weeks_input", 8)),
+            list(st.session_state.classes.keys()),
+            [],
+        )
+        st.rerun()
