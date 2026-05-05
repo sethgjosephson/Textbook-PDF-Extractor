@@ -21,6 +21,33 @@ weekly_readings.zip
 │   └── ...
 ```
 
+## Importing a Schedule from CSV or Excel
+
+Instead of filling in the schedule manually, you can upload a CSV or Excel file — useful if you want an LLM to parse your syllabus automatically.
+
+**File format** — three columns, one row per class per week:
+
+```csv
+week,class,sections
+1,Biology 101,"21.4-5, 22.1-2"
+1,Chemistry 201,3.1-3
+2,Biology 101,"22.3-4, 23.1"
+```
+
+A blank template is available via the Download button inside the app.
+
+**LLM prompt** — take a photo or screenshot of your syllabus and send it with this:
+
+```
+Convert this syllabus into a CSV with exactly three columns: week, class, sections.
+- week: the week number (integer)
+- class: the course name exactly as I will type it (e.g. Biology 101)
+- sections: the reading sections in shorthand form (e.g. 21.4-5, 22.1-2)
+One row per class per week. Skip weeks with no reading. Output only the CSV, no explanation.
+```
+
+Save the output as a `.csv` file and upload it in the Import section of the app.
+
 ## Section Spec Format
 
 | Input | Expands to |

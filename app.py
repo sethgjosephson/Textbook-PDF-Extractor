@@ -209,6 +209,67 @@ if st.session_state.classes:
     st.header("2. Weekly Schedule")
     st.caption("Enter section specs like `21.4-5, 22.1-2`. Leave blank to skip a class for that week.")
 
+    # ── Import from CSV / Excel ──────────────────────────────────────────────
+    with st.expander("Import schedule from CSV or Excel"):
+        st.markdown(
+            "Upload a file with columns **`week`**, **`class`**, **`sections`** — one row per class per week.\n\n"
+            "**LLM prompt to generate this from a syllabus photo:**\n"
+            "```\n"
+            "Convert this syllabus into a CSV with exactly three columns: week, class, sections.\n"
+            "- week: the week number (integer)\n"
+            "- class: the course name exactly as I will type it (e.g. Biology 101)\n"
+            "- sections: the reading sections in shorthand form (e.g. 21.4-5, 22.1-2)\n"
+            "One row per class per week. Skip weeks with no reading. Output only the CSV, no explanation.\n"
+            "```"
+        )
+
+        template_csv = "week,class,sections\n1,Biology 101,\"21.4-5, 22.1-2\"\n1,Chemistry 201,3.1-3\n2,Biology 101,\"22.3-4, 23.1\"\n"
+        st.download_button(
+            "Download template CSV",
+            data=template_csv,
+            file_name="schedule_template.csv",
+            mime="text/csv",
+        )
+
+        import_file = st.file_uploader("Upload schedule file", type=["csv", "xlsx"], key="schedule_import")
+        if st.button("Import", key="do_import"):
+            if import_file is None:
+                st.error("Choose a file first.")
+            else:
+                import pandas as pd
+                try:
+                    if import_file.name.endswith(".xlsx"):
+                        df = pd.read_excel(import_file, dtype=str)
+                    else:
+                        df = pd.read_csv(import_file, dtype=str)
+
+                    df.columns = df.columns.str.strip().str.lower()
+                    missing_cols = {"week", "class", "sections"} - set(df.columns)
+                    if missing_cols:
+                        st.error(f"File is missing columns: {', '.join(missing_cols)}")
+                    else:
+                        imported, skipped = 0, []
+                        loaded_classes = set(st.session_state.classes.keys())
+                        for _, row in df.iterrows():
+                            week = str(row["week"]).strip()
+                            cname = str(row["class"]).strip()
+                            spec = str(row["sections"]).strip()
+                            if not week.isdigit() or not spec or spec == "nan":
+                                continue
+                            if cname not in loaded_classes:
+                                skipped.append(cname)
+                                continue
+                            st.session_state[f"sched_{week}_{cname}"] = spec
+                            st.session_state._saved_schedule.setdefault(week, {})[cname] = spec
+                            imported += 1
+
+                        if skipped:
+                            st.warning(f"Skipped unrecognised classes (upload their PDFs first): **{'**, **'.join(set(skipped))}**")
+                        st.success(f"Imported {imported} schedule entr{'ies' if imported != 1 else 'y'}.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Could not parse file: {e}")
+
     num_weeks = st.number_input(
         "Number of weeks",
         min_value=1,
